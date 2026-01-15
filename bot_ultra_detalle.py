@@ -1,69 +1,75 @@
 import os
-import json
 from datetime import datetime
 
 import gspread
+from google.oauth2.service_account import Credentials
+
 from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
-    filters
+    filters,
 )
-from google.oauth2.service_account import Credentials
 
-# ================== VARIABLES DE ENTORNO ==================
+# ================== CONFIG ==================
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GOOGLE_CREDS = os.environ.get("GOOGLE_CREDENTIALS")
 
-if not TOKEN:
-    raise RuntimeError("❌ TELEGRAM_TOKEN no definido")
-
-if not GOOGLE_CREDS:
-    raise RuntimeError("❌ GOOGLE_CREDENTIALS no definido")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID")
+LOG_SHEET_NAME = "Log_Busquedas"
 
 # ================== GOOGLE SHEETS ==================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/drive",
 ]
 
-creds_dict = json.loads(GOOGLE_CREDS)
-credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-client = gspread.authorize(credentials)
+creds_info = {
+    "type": "service_account",
+    "project_id": os.environ.get("GCP_PROJECT_ID"),
+    "private_key_id": os.environ.get("GCP_PRIVATE_KEY_ID"),
+    "private_key": os.environ.get("GCP_PRIVATE_KEY").replace("\\n", "\n"),
+    "client_email": os.environ.get("GCP_CLIENT_EMAIL"),
+    "client_id": os.environ.get("GCP_CLIENT_ID"),
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": os.environ.get("GCP_CLIENT_CERT_URL"),
+}
 
-SPREADSHEET_NAME = "BD_Codigos_Bot"
-LOG_SHEET_NAME = "Log_Busquedas"
+creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+client = gspread.authorize(creds)
 
-sheet = client.open(SPREADSHEET_NAME).sheet1
+spreadsheet = client.open_by_key(SPREADSHEET_ID)
+sheet = spreadsheet.sheet1
 
+# Crear hoja de log si no existe
 try:
-    log_sheet = client.open(SPREADSHEET_NAME).worksheet(LOG_SHEET_NAME)
+    log_sheet = spreadsheet.worksheet(LOG_SHEET_NAME)
 except gspread.exceptions.WorksheetNotFound:
-    log_sheet = client.open(SPREADSHEET_NAME).add_worksheet(
+    log_sheet = spreadsheet.add_worksheet(
         title=LOG_SHEET_NAME, rows="1000", cols="6"
     )
     log_sheet.append_row(
-        ["Fecha", "Telegram_ID", "Nombre", "Usuario", "Busqueda", "Coincidencias"]
+        ["Fecha/Hora", "Telegram_ID", "Nombre", "Username", "DNI/Código", "Coincidencias"]
     )
 
-# ================== BOT ==================
+# ================== COMANDOS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Bot activo\n\n"
-        "Envía un DNI o código (completo o parcial).\n"
-        "Se mostrarán las coincidencias."
+        "🤖 Bot activo 24/7.\n\n"
+        "📌 Envía un DNI o código (parcial o completo)."
     )
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text.strip().lower()
+    query = update.message.text.strip().lower()
     registros = sheet.get_all_records()
 
     resultados = []
     for fila in registros:
-        for valor in fila.values():
-            if texto in str(valor).lower():
+        for value in fila.values():
+            if query in str(value).lower():
                 resultados.append(fila)
                 break
 
@@ -75,25 +81,32 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user.id,
         user.first_name,
         user.username or "",
-        texto,
-        len(resultados)
+        query,
+        len(resultados),
     ])
 
     if resultados:
-        await update.message.reply_text(f"🔍 {len(resultados)} coincidencia(s):")
+        await update.message.reply_text(
+            f"🔍 Se encontraron {len(resultados)} coincidencias:"
+        )
         for fila in resultados:
-            msg = "\n".join([f"{k}: {v}" for k, v in fila.items()])
-            await update.message.reply_text(msg)
+            texto = "\n".join(f"{k}: {v}" for k, v in fila.items())
+            await update.message.reply_text(texto)
     else:
-        await update.message.reply_text("❌ No se encontraron coincidencias")
+        await update.message.reply_text("❌ No se encontraron coincidencias.")
 
+# ================== MAIN ==================
 def main():
+    if not TOKEN:
+        raise ValueError("❌ TELEGRAM_TOKEN no definido")
+
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, buscar))
-    print("🤖 Bot iniciado")
-    app.run_polling()
+
+    print("🤖 Bot ejecutándose correctamente en Render")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
