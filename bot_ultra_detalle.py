@@ -4,6 +4,8 @@ import json
 import logging
 import threading
 import io
+import asyncio
+import requests # LIBRERÍA NUEVA PARA CONECTAR A GITHUB
 from functools import wraps
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, ReplyKeyboardMarkup
@@ -20,9 +22,10 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# ================== 1. CONFIGURACIÓN DE SEGURIDAD ==================
-# ¡PON TU ID AQUÍ!
-USUARIOS_PERMITIDOS = [964487835] 
+# ================== 1. CONFIGURACIÓN ==================
+NOMBRE_HOJA_USUARIOS = "Usuarios" 
+# Configura aquí el repositorio que quieres usar (Usuario/Repositorio)
+GITHUB_REPO = "jmcastagneto/datos-covid-19-peru" 
 
 # ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
@@ -35,209 +38,163 @@ TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
-# ================== 3. DECORADOR DE SEGURIDAD ==================
-def restringido(func):
-    @wraps(func)
-    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        user_id = update.effective_user.id
-        if user_id not in USUARIOS_PERMITIDOS:
-            await update.message.reply_text("⛔ **ACCESO DENEGADO**", parse_mode=ParseMode.MARKDOWN)
-            return
-        return await func(update, context, *args, **kwargs)
-    return wrapped
-
-# ================== 4. SERVIDOR KEEP-ALIVE ==================
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.wfile.write(b"Bot Drive Activo")
-
-def run_simple_server():
-    port = int(os.environ.get("PORT", 10000))
-    httpd = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    httpd.serve_forever()
-
-# ================== 5. CONEXIÓN GOOGLE SERVICES ==================
+# ================== 3. CONEXIONES (GOOGLE & GITHUB) ==================
 def get_creds():
     if not GOOGLE_CREDS_JSON: return None
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     return Credentials.from_service_account_info(creds_dict, scopes=scope)
 
 def conectar_sheets():
     creds = get_creds()
     if not creds: return None
     try:
-        return gspread.authorize(creds).open_by_key(SPREADSHEET_ID).sheet1
-    except Exception as e:
-        logger.error(f"Error Sheets: {e}")
-        return None
+        return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
+    except: return None
 
 def conectar_drive():
     creds = get_creds()
     if not creds: return None
     try:
         return build('drive', 'v3', credentials=creds)
+    except: return None
+
+# ================== 4. GESTIÓN DE PERMISOS ==================
+def verificar_usuario(user_id):
+    wb = conectar_sheets()
+    if not wb: return None
+    try:
+        hoja = wb.worksheet(NOMBRE_HOJA_USUARIOS)
+        registros = hoja.get_all_records()
+        for reg in registros:
+            if str(reg.get('ID_Telegram')) == str(user_id):
+                return reg.get('Rol', 'Docente')
+    except: return None
+    return None
+
+def usuario_registrado(func):
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if not verificar_usuario(user_id):
+            await update.message.reply_text("⛔ No estás registrado.")
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
+# ================== 5. LÓGICA GITHUB (NUEVO) ==================
+def buscar_en_github(termino):
+    """Busca archivos en el repositorio público configurado"""
+    url = f"https://api.github.com/search/code?q={termino}+repo:{GITHUB_REPO}"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        
+        archivos_encontrados = []
+        if 'items' in data:
+            for item in data['items']:
+                nombre = item['name']
+                link_descarga = item['html_url'].replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                archivos_encontrados.append(f"🐙 **GitHub:** [{nombre}]({link_descarga})")
+        return archivos_encontrados
     except Exception as e:
-        logger.error(f"Error Drive API: {e}")
-        return None
+        logger.error(f"Error GitHub: {e}")
+        return []
 
-sheet = conectar_sheets()
-drive_service = conectar_drive()
-
-# ================== 6. COMANDOS Y MENÚ ==================
+# ================== 6. COMANDOS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    teclado = [["🔍 Buscar", "📝 Registrar"], ["📂 Exportar Todo", "🆔 Ver mi ID"], ["❓ Ayuda"]]
-    markup = ReplyKeyboardMarkup(teclado, resize_keyboard=True)
-    estado = "✅ AUTORIZADO" if user_id in USUARIOS_PERMITIDOS else "⛔ NO AUTORIZADO"
+    rol = verificar_usuario(user_id)
     
-    await update.message.reply_text(
-        f"🤖 **Bot Gestor + Archivos**\n👋 Hola, {update.effective_user.first_name}.\n🔐 Estado: **{estado}**",
-        reply_markup=markup, parse_mode=ParseMode.MARKDOWN
-    )
-
-@restringido
-async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    texto = update.message.text
-    if texto == "🔍 Buscar": await update.message.reply_text("🔎 Escribe: `/buscar [Dato]`")
-    elif texto == "📝 Registrar": await update.message.reply_text("✍️ Escribe: `/registrar [Datos...]`")
-    elif texto == "📂 Exportar Todo": await exportar_archivo(update, context)
-    elif texto == "🆔 Ver mi ID": await update.message.reply_text(f"🆔 ID: `{update.effective_user.id}`")
-    elif texto == "❓ Ayuda": await update.message.reply_text("ℹ️ Busca archivos en Drive o datos en Excel.")
-
-# --- EXPORTAR EXCEL ---
-@restringido
-async def exportar_archivo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global sheet
-    if sheet is None: sheet = conectar_sheets()
-    await update.message.reply_text("⏳ Generando reporte...")
-    try:
-        datos = sheet.get_all_values()
-        if not datos: return await update.message.reply_text("📂 Hoja vacía.")
-        
-        with open("Reporte.csv", 'w', newline='', encoding='utf-8') as f:
-            csv.writer(f).writerows(datos)
-        
-        with open("Reporte.csv", 'rb') as f:
-            await update.message.reply_document(document=f, caption="📊 Reporte CSV")
-        os.remove("Reporte.csv")
-    except Exception as e:
-        logger.error(e)
-        await update.message.reply_text("❌ Error exportando.")
-
-# --- REGISTRAR ---
-@restringido
-async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global sheet
-    if sheet is None: sheet = conectar_sheets()
-    if not context.args: return await update.message.reply_text("⚠️ Faltan datos.")
-    datos = [d.upper() for d in list(context.args)]
-    try:
-        sheet.append_row(datos)
-        await update.message.reply_text(f"✅ Guardado: {' '.join(datos)}")
-    except: await update.message.reply_text("❌ Error guardando.")
-
-# --- NUEVO: BÚSQUEDA HÍBRIDA (EXCEL + DRIVE) ---
-@restringido
-async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global sheet, drive_service
-    if sheet is None: sheet = conectar_sheets()
-    if drive_service is None: drive_service = conectar_drive()
-
-    if not context.args:
-        await update.message.reply_text("⚠️ Ejemplo: `/buscar Factura`")
+    if not rol:
+        await update.message.reply_text("⛔ Acceso Denegado. Pide al admin que te registre.")
         return
 
-    termino = " ".join(context.args) # Mantenemos mayúsculas/minúsculas originales para Drive
-    termino_lower = termino.lower()
+    teclado = [["🔍 Buscar", "📂 Mis Archivos"], ["❓ Ayuda", "🆔 Mi ID"]]
+    if rol == 'Admin': teclado.insert(1, ["📢 Nuevo Anuncio"])
     
-    await update.message.reply_text(f"🔍 Buscando '{termino}' en Base de Datos y Drive...")
+    markup = ReplyKeyboardMarkup(teclado, resize_keyboard=True)
+    await update.message.reply_text(f"🤖 **Bot Conectado a GitHub**\nHola {update.effective_user.first_name}", reply_markup=markup)
 
-    # 1. BÚSQUEDA EN GOOGLE SHEETS (TEXTO)
-    encontrado_sheet = False
-    try:
-        vals = sheet.get_all_values()
-        if vals:
-            titulos, datos = vals[0], vals[1:]
-            resultados = []
-            for fila in datos:
-                if termino_lower in " ".join(fila).lower():
-                    ficha = " | ".join([f"{titulos[i]}: {d}" for i, d in enumerate(fila) if d.strip()])
-                    resultados.append(ficha)
-            
-            if resultados:
-                encontrado_sheet = True
-                txt = "📄 **Datos en Excel:**\n" + "\n".join(resultados[:3])
-                await update.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        logger.error(f"Error Sheet: {e}")
+@usuario_registrado
+async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text
+    if texto == "🔍 Buscar": await update.message.reply_text("🔎 Usa: `/buscar [nombre]`")
+    elif texto == "📂 Mis Archivos": await update.message.reply_text("📂 Busca en Drive con `/buscar`")
+    elif texto == "🆔 Mi ID": await update.message.reply_text(f"🆔 `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
+    elif texto == "📢 Nuevo Anuncio": await update.message.reply_text("📢 Usa: `/anuncio [mensaje]`")
 
-    # 2. BÚSQUEDA EN GOOGLE DRIVE (ARCHIVOS)
-    try:
-        # Buscamos archivos que contengan el nombre y no estén en la papelera
+@usuario_registrado
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args: return await update.message.reply_text("⚠️ Ejemplo: `/buscar reporte`")
+    
+    termino = " ".join(context.args)
+    await update.message.reply_text(f"🔍 Buscando '{termino}' en todas las bases de datos...")
+
+    mensajes_respuesta = []
+
+    # 1. BÚSQUEDA GOOGLE SHEETS
+    wb = conectar_sheets()
+    if wb:
+        hoja = wb.get_worksheet(0)
+        vals = hoja.get_all_values()
+        encontrados_sheet = [f"📊 {' '.join(f)}" for f in vals if termino.lower() in " ".join(f).lower()]
+        if encontrados_sheet:
+            mensajes_respuesta.append("**Resultados en Excel:**\n" + "\n".join(encontrados_sheet[:3]))
+
+    # 2. BÚSQUEDA GOOGLE DRIVE
+    drive = conectar_drive()
+    if drive:
         query = f"name contains '{termino}' and trashed = false"
-        results = drive_service.files().list(q=query, pageSize=1, fields="files(id, name, mimeType)").execute()
-        items = results.get('files', [])
+        res = drive.files().list(q=query, pageSize=1, fields="files(id, name, webViewLink)").execute()
+        files = res.get('files', [])
+        if files:
+            f = files[0]
+            mensajes_respuesta.append(f"📎 **Google Drive:** [{f['name']}]({f['webViewLink']})")
 
-        if not items:
-            if not encontrado_sheet:
-                await update.message.reply_text("❌ No encontré datos en Excel ni archivos en Drive.")
-            else:
-                await update.message.reply_text("📂 No se encontraron archivos adjuntos en Drive.")
-            return
+    # 3. BÚSQUEDA GITHUB (NUEVO)
+    resultados_github = buscar_en_github(termino)
+    if resultados_github:
+        mensajes_respuesta.append("\n".join(resultados_github[:3]))
 
-        # Si encontramos un archivo
-        archivo = items[0]
-        file_id = archivo['id']
-        file_name = archivo['name']
-        mime_type = archivo['mimeType']
+    # ENVIAR RESULTADOS
+    if mensajes_respuesta:
+        await update.message.reply_text("\n\n".join(mensajes_respuesta), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text("❌ No encontré nada en Excel, Drive ni GitHub.")
 
-        await update.message.reply_text(f"📎 **Archivo encontrado en Drive:**\n`{file_name}`\nDescargando y enviando...", parse_mode=ParseMode.MARKDOWN)
+# --- COMANDO ANUNCIO (Solo Admin) ---
+async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if verificar_usuario(user_id) != 'Admin': return
+    
+    msg = " ".join(context.args)
+    wb = conectar_sheets()
+    users = wb.worksheet(NOMBRE_HOJA_USUARIOS).get_all_records()
+    
+    for u in users:
+        try: await context.bot.send_message(chat_id=u['ID_Telegram'], text=f"📢 **ANUNCIO:**\n{msg}", parse_mode=ParseMode.MARKDOWN)
+        except: pass
+    await update.message.reply_text("✅ Anuncio enviado.")
 
-        # Lógica de Descarga
-        request = drive_service.files().get_media(fileId=file_id)
-        
-        # Si es un Google Doc nativo (Doc, Sheet, Slide), hay que exportarlo a PDF
-        if "application/vnd.google-apps" in mime_type:
-            if "document" in mime_type:
-                request = drive_service.files().export_media(fileId=file_id, mimeType='application/pdf')
-                file_name += ".pdf"
-            elif "spreadsheet" in mime_type:
-                request = drive_service.files().export_media(fileId=file_id, mimeType='application/pdf')
-                file_name += ".pdf"
-            else:
-                await update.message.reply_text("⚠️ Archivo de Google no soportado para descarga directa.")
-                return
+# ================== SERVER ==================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.wfile.write(b"Bot GitHub Activo")
 
-        # Descargar en memoria RAM (BytesIO) para no llenar el disco del servidor
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
+def run_server():
+    port = int(os.environ.get("PORT", 10000))
+    HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
-        fh.seek(0) # Volver al inicio del archivo en memoria
-        
-        # Enviar a Telegram
-        await update.message.reply_document(document=fh, filename=file_name, caption=f"Aquí tienes el archivo: {file_name}")
-
-    except Exception as e:
-        logger.error(f"Error Drive: {e}")
-        await update.message.reply_text("❌ Error al intentar descargar el archivo de Drive.")
-
-# ================== 7. EJECUCIÓN ==================
 def main():
-    threading.Thread(target=run_simple_server, daemon=True).start()
+    threading.Thread(target=run_server, daemon=True).start()
     if not TOKEN: return
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("registrar", registrar))
     app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CommandHandler("anuncio", anuncio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_botones))
     app.run_polling()
 
