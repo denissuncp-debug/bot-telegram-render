@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import threading
+from functools import wraps
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.constants import ParseMode
@@ -13,157 +14,150 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ================== 1. CONFIGURACIÓN DE LOGS ==================
+# ================== 1. CONFIGURACIÓN DE SEGURIDAD (¡EDITAR ESTO!) ==================
+# Poner aquí los IDs numéricos de las personas autorizadas.
+# Ejemplo: [123456789, 987654321]
+# El bot te dirá tu ID al usar /start si no lo sabes.
+USUARIOS_PERMITIDOS = [123456789] 
+
+# ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ================== 2. VARIABLES DE ENTORNO ==================
 TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
-# ================== 3. SERVIDOR "KEEP-ALIVE" (SIMPLE) ==================
+# ================== 3. DECORADOR DE SEGURIDAD ==================
+def restringido(func):
+    """Este 'portero' verifica si el usuario tiene permiso antes de dejarlo pasar."""
+    @wraps(func)
+    async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = update.effective_user.id
+        if user_id not in USUARIOS_PERMITIDOS:
+            print(f"⛔ Intento de acceso no autorizado: {user_id} ({update.effective_user.first_name})")
+            await update.message.reply_text(
+                f"⛔ **ACCESO DENEGADO**\nNo tienes permiso para usar este bot.\n"
+                f"Tu ID es: `{user_id}`\n(Envía este ID al administrador para solicitar acceso).",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapped
+
+# ================== 4. SERVIDOR KEEP-ALIVE ==================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"Bot funcionando OK")
+        self.wfile.write(b"Bot Seguro Activo")
 
 def run_simple_server():
     port = int(os.environ.get("PORT", 10000))
-    server_address = ('0.0.0.0', port)
-    httpd = HTTPServer(server_address, HealthCheckHandler)
-    logger.info(f"🌍 Servidor web escuchando en el puerto {port}")
+    httpd = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     httpd.serve_forever()
 
-# ================== 4. CONEXIÓN GOOGLE SHEETS ==================
+# ================== 5. CONEXIÓN GOOGLE SHEETS ==================
 def conectar_sheets():
-    if not GOOGLE_CREDS_JSON:
-        logger.error("⚠️ Falta la variable GOOGLE_CREDS_JSON")
-        return None
-        
+    if not GOOGLE_CREDS_JSON: return None
     try:
-        creds_dict = json.loads(GOOGLE_CREDS_JSON)
-        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(credentials)
-        return client.open_by_key(SPREADSHEET_ID).sheet1
+        creds = json.loads(GOOGLE_CREDS_JSON)
+        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        return gspread.authorize(Credentials.from_service_account_info(creds, scopes=scope)).open_by_key(SPREADSHEET_ID).sheet1
     except Exception as e:
-        logger.error(f"⚠️ Error conectando a Sheets: {e}")
+        logger.error(f"Error Sheets: {e}")
         return None
 
 sheet = conectar_sheets()
 
-# ================== 5. COMANDOS DEL BOT ==================
+# ================== 6. COMANDOS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Este comando es público para que el usuario pueda averiguar su ID
+    user_id = update.effective_user.id
+    estado = "✅ AUTORIZADO" if user_id in USUARIOS_PERMITIDOS else "⛔ NO AUTORIZADO"
+    
     await update.message.reply_text(
-        "🤖 **Bot Activo**\nUsa `/registrar [Datos]` o `/buscar [Nombre]`",
+        f"🤖 **Bot de Gestión Seguro**\n\n"
+        f"👋 Hola, {update.effective_user.first_name}.\n"
+        f"🆔 Tu ID: `{user_id}`\n"
+        f"🔐 Estado: **{estado}**\n\n"
+        "Comandos (Solo autorizados):\n"
+        "📝 `/registrar [Datos]`\n"
+        "🔍 `/buscar [Nombre]`",
         parse_mode=ParseMode.MARKDOWN
     )
 
+@restringido
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global sheet
-    if sheet is None:
-        sheet = conectar_sheets()
-        if sheet is None:
-            await update.message.reply_text("❌ Error de conexión con Google Sheets.")
-            return
-
+    if sheet is None: sheet = conectar_sheets()
+    
     if not context.args:
-        await update.message.reply_text("⚠️ Escribe los datos. Ejemplo:\n`/registrar Juan Perez 30`")
+        await update.message.reply_text("⚠️ Uso: `/registrar Dato1 Dato2...`")
         return
 
-    datos = list(context.args)
+    # Convertimos a MAYÚSCULAS para mantener orden
+    datos = [d.upper() for d in list(context.args)]
+    
     try:
         sheet.append_row(datos)
-        await update.message.reply_text(f"✅ Guardado: {' '.join(datos)}")
-    except Exception as e:
+        await update.message.reply_text(f"✅ **Guardado:** {' '.join(datos)}", parse_mode=ParseMode.MARKDOWN)
+    except Exception:
         await update.message.reply_text("❌ Error guardando datos.")
-        logger.error(f"Error append_row: {e}")
 
+@restringido
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global sheet
-    if sheet is None:
-        sheet = conectar_sheets()
-        if sheet is None:
-            await update.message.reply_text("❌ Error de conexión con Google Sheets.")
-            return
+    if sheet is None: sheet = conectar_sheets()
 
     if not context.args:
-        await update.message.reply_text("⚠️ Escribe qué buscar. Ejemplo:\n`/buscar Juan`")
+        await update.message.reply_text("⚠️ Uso: `/buscar Nombre`")
         return
 
     termino = " ".join(context.args).lower()
     await update.message.reply_text(f"🔍 Buscando '{termino}'...")
 
     try:
-        # Obtenemos TODOS los valores de la hoja
-        valores = sheet.get_all_values()
-        
-        if not valores:
-            await update.message.reply_text("⚠️ La hoja está vacía.")
+        vals = sheet.get_all_values()
+        if not vals: 
+            await update.message.reply_text("La hoja está vacía.")
             return
 
-        # SEPARAR CABECERAS Y DATOS
-        # La fila 0 son los títulos (DNI, Nombre, Cargo...)
-        titulos = valores[0] 
-        # El resto son los datos de las personas
-        filas_datos = valores[1:] 
-
+        titulos, datos = vals[0], vals[1:]
         encontrados = []
-        
-        for fila in filas_datos:
-            # Convertimos la fila a texto para buscar la palabra clave
-            contenido_fila = " ".join(fila).lower()
-            
-            if termino in contenido_fila:
-                # ¡Encontrado! Ahora formateamos "Titulo: Valor"
+
+        for fila in datos:
+            if termino in " ".join(fila).lower():
                 ficha = ""
                 for i, dato in enumerate(fila):
-                    # Solo mostramos si hay dato en esa celda
                     if dato.strip():
-                        # Si existe titulo para esa columna lo usamos, si no ponemos "Dato"
-                        nombre_titulo = titulos[i] if i < len(titulos) else f"Dato {i+1}"
-                        ficha += f"🔹 *{nombre_titulo}:* {dato}\n"
-                
+                        t = titulos[i] if i < len(titulos) else f"Dato {i+1}"
+                        ficha += f"🔹 *{t}:* {dato}\n"
                 encontrados.append(ficha)
 
         if encontrados:
-            # Enviamos los resultados (máximo 5 fichas para no llenar la pantalla)
-            respuesta = f"✅ **Resultados encontrados ({len(encontrados)}):**\n\n"
-            respuesta += "\n➖➖➖➖➖➖➖➖\n".join(encontrados[:5])
-            
-            if len(encontrados) > 5:
-                respuesta += f"\n\n⚠️ _...y {len(encontrados)-5} resultados más. Sé más específico._"
-            
-            await update.message.reply_text(respuesta, parse_mode=ParseMode.MARKDOWN)
+            res = f"✅ **Resultados ({len(encontrados)}):**\n\n" + "\n➖➖➖\n".join(encontrados[:5])
+            await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("❌ No se encontraron coincidencias.")
+            await update.message.reply_text("❌ No encontrado.")
 
     except Exception as e:
-        await update.message.reply_text("❌ Error leyendo la hoja.")
-        logger.error(f"Error búsqueda: {e}")
+        logger.error(e)
+        await update.message.reply_text("❌ Error técnico.")
 
-# ================== 6. EJECUCIÓN PRINCIPAL ==================
+# ================== 7. EJECUCIÓN ==================
 def main():
-    hilo_server = threading.Thread(target=run_simple_server, daemon=True)
-    hilo_server.start()
+    threading.Thread(target=run_simple_server, daemon=True).start()
+    if not TOKEN: return
 
-    if not TOKEN:
-        logger.critical("❌ NO HAY TOKEN. Configura BOT_TOKEN en Render.")
-        return
-
-    logger.info("🤖 Iniciando polling de Telegram...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("registrar", registrar))
     app.add_handler(CommandHandler("buscar", buscar))
     
+    print("🤖 Bot Seguro Iniciado...")
     app.run_polling()
-
 if __name__ == "__main__":
     main()
