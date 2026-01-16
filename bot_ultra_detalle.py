@@ -4,6 +4,7 @@ import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -25,7 +26,6 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
 # ================== 3. SERVIDOR "KEEP-ALIVE" (SIMPLE) ==================
-# Este servidor responde a Render inmediatamente para decir "Estoy vivo"
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -34,7 +34,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot funcionando OK")
 
 def run_simple_server():
-    # Render asigna un puerto en la variable de entorno PORT. Por defecto 10000.
     port = int(os.environ.get("PORT", 10000))
     server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, HealthCheckHandler)
@@ -57,19 +56,19 @@ def conectar_sheets():
         logger.error(f"⚠️ Error conectando a Sheets: {e}")
         return None
 
-# Intentamos conectar una vez al inicio
 sheet = conectar_sheets()
 
 # ================== 5. COMANDOS DEL BOT ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 **Bot Activo**\nUsa `/registrar [Datos]` o `/buscar [Nombre]`"
+        "🤖 **Bot Activo**\nUsa `/registrar [Datos]` o `/buscar [Nombre]`",
+        parse_mode=ParseMode.MARKDOWN
     )
 
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global sheet
     if sheet is None:
-        sheet = conectar_sheets() # Reintentar conexión si falló antes
+        sheet = conectar_sheets()
         if sheet is None:
             await update.message.reply_text("❌ Error de conexión con Google Sheets.")
             return
@@ -102,33 +101,62 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🔍 Buscando '{termino}'...")
 
     try:
+        # Obtenemos TODOS los valores de la hoja
         valores = sheet.get_all_values()
-        encontrados = []
-        for fila in valores:
-            if termino in " ".join(fila).lower():
-                encontrados.append(" | ".join(fila))
         
+        if not valores:
+            await update.message.reply_text("⚠️ La hoja está vacía.")
+            return
+
+        # SEPARAR CABECERAS Y DATOS
+        # La fila 0 son los títulos (DNI, Nombre, Cargo...)
+        titulos = valores[0] 
+        # El resto son los datos de las personas
+        filas_datos = valores[1:] 
+
+        encontrados = []
+        
+        for fila in filas_datos:
+            # Convertimos la fila a texto para buscar la palabra clave
+            contenido_fila = " ".join(fila).lower()
+            
+            if termino in contenido_fila:
+                # ¡Encontrado! Ahora formateamos "Titulo: Valor"
+                ficha = ""
+                for i, dato in enumerate(fila):
+                    # Solo mostramos si hay dato en esa celda
+                    if dato.strip():
+                        # Si existe titulo para esa columna lo usamos, si no ponemos "Dato"
+                        nombre_titulo = titulos[i] if i < len(titulos) else f"Dato {i+1}"
+                        ficha += f"🔹 *{nombre_titulo}:* {dato}\n"
+                
+                encontrados.append(ficha)
+
         if encontrados:
-            msg = "✅ **Resultados:**\n" + "\n".join(encontrados[:8])
-            await update.message.reply_text(msg)
+            # Enviamos los resultados (máximo 5 fichas para no llenar la pantalla)
+            respuesta = f"✅ **Resultados encontrados ({len(encontrados)}):**\n\n"
+            respuesta += "\n➖➖➖➖➖➖➖➖\n".join(encontrados[:5])
+            
+            if len(encontrados) > 5:
+                respuesta += f"\n\n⚠️ _...y {len(encontrados)-5} resultados más. Sé más específico._"
+            
+            await update.message.reply_text(respuesta, parse_mode=ParseMode.MARKDOWN)
         else:
             await update.message.reply_text("❌ No se encontraron coincidencias.")
+
     except Exception as e:
         await update.message.reply_text("❌ Error leyendo la hoja.")
         logger.error(f"Error búsqueda: {e}")
 
 # ================== 6. EJECUCIÓN PRINCIPAL ==================
 def main():
-    # 1. Arrancar el servidor web en un hilo aparte (NO BLOQUEANTE)
     hilo_server = threading.Thread(target=run_simple_server, daemon=True)
     hilo_server.start()
 
-    # 2. Verificar Token
     if not TOKEN:
         logger.critical("❌ NO HAY TOKEN. Configura BOT_TOKEN en Render.")
         return
 
-    # 3. Arrancar el Bot
     logger.info("🤖 Iniciando polling de Telegram...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
