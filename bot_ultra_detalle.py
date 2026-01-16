@@ -12,19 +12,18 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ================== 1. CONFIGURACIÓN DEL SERVIDOR FALSO (Flask) ==================
-# Esto engaña a Render para que crea que somos una web y no nos apague.
+# ================== 1. SERVIDOR FALSO (Para mantener vivo el Bot) ==================
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def health_check():
-    return "¡El Bot está vivo y funcionando!"
+    return "¡Bot funcionando y listo para buscar!"
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000))  # Render nos da un puerto, lo usamos aquí
+    port = int(os.environ.get("PORT", 10000))
     web_app.run(host="0.0.0.0", port=port)
 
-# ================== 2. LOGGING Y VARIABLES ==================
+# ================== 2. CONFIGURACIÓN ==================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -34,71 +33,104 @@ TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
-# ================== 3. GOOGLE SHEETS ==================
+# ================== 3. CONEXIÓN A GOOGLE SHEETS ==================
 def conectar_sheets():
-    # Verificamos que las credenciales existan para evitar errores si faltan
     if not GOOGLE_CREDS_JSON:
-        print("⚠️ Error: No se encontró la variable GOOGLE_CREDS_JSON")
+        print("⚠️ Error: Falta la variable GOOGLE_CREDS_JSON")
         return None
         
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(credentials)
     return client.open_by_key(SPREADSHEET_ID).sheet1
 
-# Intentamos conectar al inicio
 try:
     sheet = conectar_sheets()
 except Exception as e:
-    print(f"⚠️ Error conectando a Sheets: {e}")
+    print(f"⚠️ Error inicial conectando a Sheets: {e}")
     sheet = None
 
 # ================== 4. COMANDOS DEL BOT ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Bot conectado correctamente.\nUsa /registrar Nombre Apellido"
+        "🤖 **Bot de Inventario/Registro**\n\n"
+        "Comandos disponibles:\n"
+        "📝 `/registrar [Dato1] [Dato2]` - Guarda información\n"
+        "🔍 `/buscar [Texto]` - Busca en la hoja de cálculo"
     )
 
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sheet is None:
-        await update.message.reply_text("❌ Error: No hay conexión con la hoja de cálculo.")
+        await update.message.reply_text("❌ Error: No hay conexión con la hoja.")
         return
 
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text("⚠️ Uso correcto:\n/registrar Nombre Apellido")
+    if not context.args:
+        await update.message.reply_text("⚠️ Uso: `/registrar Juan Perez`")
         return
 
-    nombre = context.args[0]
-    apellido = context.args[1]
+    # Unimos todo lo que escriba el usuario y lo guardamos
+    datos = list(context.args)
+    
+    try:
+        sheet.append_row(datos)
+        await update.message.reply_text(f"✅ Guardado: {' '.join(datos)}")
+    except Exception as e:
+        await update.message.reply_text("❌ Error al guardar en Sheets (¿Permisos?).")
+        print(f"Error Sheet: {e}")
+
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if sheet is None:
+        await update.message.reply_text("❌ Error: No hay conexión con la hoja.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("⚠️ Uso: `/buscar [Nombre o Dato]`")
+        return
+
+    busqueda = " ".join(context.args).lower()
+    await update.message.reply_text(f"🔍 Buscando '{busqueda}'...")
 
     try:
-        sheet.append_row([nombre, apellido])
-        await update.message.reply_text(f"✅ Guardado: {nombre} {apellido}")
-    except Exception as e:
-        await update.message.reply_text("❌ Error al guardar en Google Sheets.")
-        print(f"Error escribiendo en Sheet: {e}")
+        # Obtenemos TODOS los datos de la hoja
+        registros = sheet.get_all_values()
+        resultados = []
 
-# ================== 5. EJECUCIÓN PRINCIPAL ==================
+        # Buscamos fila por fila
+        for fila in registros:
+            texto_fila = " ".join(fila).lower()
+            if busqueda in texto_fila:
+                resultados.append(" | ".join(fila))
+
+        if resultados:
+            # Enviamos los resultados (máximo 10 para no saturar el chat)
+            respuesta = "✅ **Encontrado:**\n\n" + "\n".join(resultados[:10])
+            if len(resultados) > 10:
+                respuesta += "\n\n(Mostrando solo los primeros 10 resultados)"
+            await update.message.reply_text(respuesta)
+        else:
+            await update.message.reply_text("❌ No se encontraron coincidencias.")
+
+    except Exception as e:
+        await update.message.reply_text("❌ Error al leer la hoja.")
+        print(f"Error leyendo: {e}")
+
+# ================== 5. ARRANQUE ==================
 def main():
-    # A) Arrancar el servidor web en un hilo separado (segundo plano)
-    print("🌍 Iniciando servidor web falso para Render...")
+    # Servidor Web (Segundo plano)
     threading.Thread(target=run_web_server, daemon=True).start()
 
-    # B) Arrancar el Bot de Telegram
+    # Bot Telegram
     if not TOKEN:
-        print("❌ Error: No hay BOT_TOKEN definido en Render.")
+        print("❌ Error: Falta BOT_TOKEN en Render.")
         return
 
-    print("🤖 Iniciando Bot de Telegram...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("registrar", registrar))
+    app.add_handler(CommandHandler("buscar", buscar))
     
-    # Iniciar el polling (bucle infinito que escucha a Telegram)
+    print("🤖 Bot iniciado...")
     app.run_polling()
 if __name__ == "__main__":
     main()
