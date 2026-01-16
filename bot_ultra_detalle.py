@@ -18,7 +18,7 @@ from google.oauth2.service_account import Credentials
 
 # ================== 1. CONFIGURACIÓN DE SEGURIDAD ==================
 # ¡NO OLVIDES PONER TU ID AQUÍ! (El mismo que pusiste antes)
-USUARIOS_PERMITIDOS = [123456789] 
+USUARIOS_PERMITIDOS = [964487835,964057700] 
 
 # ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
