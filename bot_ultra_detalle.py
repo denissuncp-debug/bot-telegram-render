@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import threading
-from flask import Flask
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -12,125 +12,130 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ================== 1. SERVIDOR FALSO (Para mantener vivo el Bot) ==================
-web_app = Flask(__name__)
-
-@web_app.route('/')
-def health_check():
-    return "¡Bot funcionando y listo para buscar!"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
-
-# ================== 2. CONFIGURACIÓN ==================
+# ================== 1. CONFIGURACIÓN DE LOGS ==================
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
+# ================== 2. VARIABLES DE ENTORNO ==================
 TOKEN = os.getenv("BOT_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
-# ================== 3. CONEXIÓN A GOOGLE SHEETS ==================
+# ================== 3. SERVIDOR "KEEP-ALIVE" (SIMPLE) ==================
+# Este servidor responde a Render inmediatamente para decir "Estoy vivo"
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot funcionando OK")
+
+def run_simple_server():
+    # Render asigna un puerto en la variable de entorno PORT. Por defecto 10000.
+    port = int(os.environ.get("PORT", 10000))
+    server_address = ('0.0.0.0', port)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    logger.info(f"🌍 Servidor web escuchando en el puerto {port}")
+    httpd.serve_forever()
+
+# ================== 4. CONEXIÓN GOOGLE SHEETS ==================
 def conectar_sheets():
     if not GOOGLE_CREDS_JSON:
-        print("⚠️ Error: Falta la variable GOOGLE_CREDS_JSON")
+        logger.error("⚠️ Falta la variable GOOGLE_CREDS_JSON")
         return None
         
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    client = gspread.authorize(credentials)
-    return client.open_by_key(SPREADSHEET_ID).sheet1
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+        return client.open_by_key(SPREADSHEET_ID).sheet1
+    except Exception as e:
+        logger.error(f"⚠️ Error conectando a Sheets: {e}")
+        return None
 
-try:
-    sheet = conectar_sheets()
-except Exception as e:
-    print(f"⚠️ Error inicial conectando a Sheets: {e}")
-    sheet = None
+# Intentamos conectar una vez al inicio
+sheet = conectar_sheets()
 
-# ================== 4. COMANDOS DEL BOT ==================
+# ================== 5. COMANDOS DEL BOT ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 **Bot de Inventario/Registro**\n\n"
-        "Comandos disponibles:\n"
-        "📝 `/registrar [Dato1] [Dato2]` - Guarda información\n"
-        "🔍 `/buscar [Texto]` - Busca en la hoja de cálculo"
+        "🤖 **Bot Activo**\nUsa `/registrar [Datos]` o `/buscar [Nombre]`"
     )
 
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global sheet
     if sheet is None:
-        await update.message.reply_text("❌ Error: No hay conexión con la hoja.")
-        return
+        sheet = conectar_sheets() # Reintentar conexión si falló antes
+        if sheet is None:
+            await update.message.reply_text("❌ Error de conexión con Google Sheets.")
+            return
 
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/registrar Juan Perez`")
+        await update.message.reply_text("⚠️ Escribe los datos. Ejemplo:\n`/registrar Juan Perez 30`")
         return
 
-    # Unimos todo lo que escriba el usuario y lo guardamos
     datos = list(context.args)
-    
     try:
         sheet.append_row(datos)
         await update.message.reply_text(f"✅ Guardado: {' '.join(datos)}")
     except Exception as e:
-        await update.message.reply_text("❌ Error al guardar en Sheets (¿Permisos?).")
-        print(f"Error Sheet: {e}")
+        await update.message.reply_text("❌ Error guardando datos.")
+        logger.error(f"Error append_row: {e}")
 
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global sheet
     if sheet is None:
-        await update.message.reply_text("❌ Error: No hay conexión con la hoja.")
-        return
+        sheet = conectar_sheets()
+        if sheet is None:
+            await update.message.reply_text("❌ Error de conexión con Google Sheets.")
+            return
 
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/buscar [Nombre o Dato]`")
+        await update.message.reply_text("⚠️ Escribe qué buscar. Ejemplo:\n`/buscar Juan`")
         return
 
-    busqueda = " ".join(context.args).lower()
-    await update.message.reply_text(f"🔍 Buscando '{busqueda}'...")
+    termino = " ".join(context.args).lower()
+    await update.message.reply_text(f"🔍 Buscando '{termino}'...")
 
     try:
-        # Obtenemos TODOS los datos de la hoja
-        registros = sheet.get_all_values()
-        resultados = []
-
-        # Buscamos fila por fila
-        for fila in registros:
-            texto_fila = " ".join(fila).lower()
-            if busqueda in texto_fila:
-                resultados.append(" | ".join(fila))
-
-        if resultados:
-            # Enviamos los resultados (máximo 10 para no saturar el chat)
-            respuesta = "✅ **Encontrado:**\n\n" + "\n".join(resultados[:10])
-            if len(resultados) > 10:
-                respuesta += "\n\n(Mostrando solo los primeros 10 resultados)"
-            await update.message.reply_text(respuesta)
+        valores = sheet.get_all_values()
+        encontrados = []
+        for fila in valores:
+            if termino in " ".join(fila).lower():
+                encontrados.append(" | ".join(fila))
+        
+        if encontrados:
+            msg = "✅ **Resultados:**\n" + "\n".join(encontrados[:8])
+            await update.message.reply_text(msg)
         else:
             await update.message.reply_text("❌ No se encontraron coincidencias.")
-
     except Exception as e:
-        await update.message.reply_text("❌ Error al leer la hoja.")
-        print(f"Error leyendo: {e}")
+        await update.message.reply_text("❌ Error leyendo la hoja.")
+        logger.error(f"Error búsqueda: {e}")
 
-# ================== 5. ARRANQUE ==================
+# ================== 6. EJECUCIÓN PRINCIPAL ==================
 def main():
-    # Servidor Web (Segundo plano)
-    threading.Thread(target=run_web_server, daemon=True).start()
+    # 1. Arrancar el servidor web en un hilo aparte (NO BLOQUEANTE)
+    hilo_server = threading.Thread(target=run_simple_server, daemon=True)
+    hilo_server.start()
 
-    # Bot Telegram
+    # 2. Verificar Token
     if not TOKEN:
-        print("❌ Error: Falta BOT_TOKEN en Render.")
+        logger.critical("❌ NO HAY TOKEN. Configura BOT_TOKEN en Render.")
         return
 
+    # 3. Arrancar el Bot
+    logger.info("🤖 Iniciando polling de Telegram...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("registrar", registrar))
     app.add_handler(CommandHandler("buscar", buscar))
     
-    print("🤖 Bot iniciado...")
     app.run_polling()
+
 if __name__ == "__main__":
     main()
