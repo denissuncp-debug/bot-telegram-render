@@ -18,7 +18,7 @@ from google.oauth2.service_account import Credentials
 # Poner aquí los IDs numéricos de las personas autorizadas.
 # Ejemplo: [123456789, 987654321]
 # El bot te dirá tu ID al usar /start si no lo sabes.
-USUARIOS_PERMITIDOS = [123456789] 
+USUARIOS_PERMITIDOS = [964487835] 
 
 # ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
