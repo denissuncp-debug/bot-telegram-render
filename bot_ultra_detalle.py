@@ -4,21 +4,21 @@ import logging
 import threading
 from functools import wraps
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
+    MessageHandler,
+    filters,
     ContextTypes,
 )
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ================== 1. CONFIGURACIÓN DE SEGURIDAD (¡EDITAR ESTO!) ==================
-# Poner aquí los IDs numéricos de las personas autorizadas.
-# Ejemplo: [123456789, 987654321]
-# El bot te dirá tu ID al usar /start si no lo sabes.
-USUARIOS_PERMITIDOS = [964487835] 
+# ================== 1. CONFIGURACIÓN DE SEGURIDAD ==================
+# ¡NO OLVIDES PONER TU ID AQUÍ! (El mismo que pusiste antes)
+USUARIOS_PERMITIDOS = [123456789] 
 
 # ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
@@ -33,17 +33,12 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
 # ================== 3. DECORADOR DE SEGURIDAD ==================
 def restringido(func):
-    """Este 'portero' verifica si el usuario tiene permiso antes de dejarlo pasar."""
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         user_id = update.effective_user.id
         if user_id not in USUARIOS_PERMITIDOS:
-            print(f"⛔ Intento de acceso no autorizado: {user_id} ({update.effective_user.first_name})")
-            await update.message.reply_text(
-                f"⛔ **ACCESO DENEGADO**\nNo tienes permiso para usar este bot.\n"
-                f"Tu ID es: `{user_id}`\n(Envía este ID al administrador para solicitar acceso).",
-                parse_mode=ParseMode.MARKDOWN
-            )
+            print(f"⛔ Intento no autorizado: {user_id}")
+            await update.message.reply_text("⛔ **ACCESO DENEGADO**", parse_mode=ParseMode.MARKDOWN)
             return
         return await func(update, context, *args, **kwargs)
     return wrapped
@@ -52,7 +47,7 @@ def restringido(func):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.wfile.write(b"Bot Seguro Activo")
+        self.wfile.write(b"Bot Con Botones Activo")
 
 def run_simple_server():
     port = int(os.environ.get("PORT", 10000))
@@ -72,22 +67,45 @@ def conectar_sheets():
 
 sheet = conectar_sheets()
 
-# ================== 6. COMANDOS ==================
+# ================== 6. COMANDOS Y BOTONES ==================
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Este comando es público para que el usuario pueda averiguar su ID
     user_id = update.effective_user.id
+    
+    # Definimos el diseño de los botones
+    teclado = [
+        ["🔍 Buscar", "📝 Registrar"],
+        ["🆔 Ver mi ID", "❓ Ayuda"]
+    ]
+    markup = ReplyKeyboardMarkup(teclado, resize_keyboard=True) # resize=True hace que no ocupen media pantalla
+    
     estado = "✅ AUTORIZADO" if user_id in USUARIOS_PERMITIDOS else "⛔ NO AUTORIZADO"
     
     await update.message.reply_text(
-        f"🤖 **Bot de Gestión Seguro**\n\n"
+        f"🤖 **Sistema de Gestión**\n"
         f"👋 Hola, {update.effective_user.first_name}.\n"
-        f"🆔 Tu ID: `{user_id}`\n"
         f"🔐 Estado: **{estado}**\n\n"
-        "Comandos (Solo autorizados):\n"
-        "📝 `/registrar [Datos]`\n"
-        "🔍 `/buscar [Nombre]`",
+        "👇 **Usa los botones del menú abajo:**",
+        reply_markup=markup,
         parse_mode=ParseMode.MARKDOWN
     )
+
+# Función para manejar los clics en los botones (que envían texto)
+@restringido
+async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text
+    
+    if texto == "🔍 Buscar":
+        await update.message.reply_text("🔎 Para buscar, escribe el comando así:\n`/buscar [Nombre o DNI]`", parse_mode=ParseMode.MARKDOWN)
+    
+    elif texto == "📝 Registrar":
+        await update.message.reply_text("✍️ Para registrar, escribe los datos así:\n`/registrar [Dato1] [Dato2] ...`", parse_mode=ParseMode.MARKDOWN)
+        
+    elif texto == "🆔 Ver mi ID":
+        await update.message.reply_text(f"🆔 Tu ID de Telegram es: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
+        
+    elif texto == "❓ Ayuda":
+        await update.message.reply_text("ℹ️ **Ayuda:**\nUsa /registrar para guardar datos en la hoja.\nUsa /buscar para encontrar información existente.", parse_mode=ParseMode.MARKDOWN)
 
 @restringido
 async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -95,17 +113,15 @@ async def registrar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sheet is None: sheet = conectar_sheets()
     
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/registrar Dato1 Dato2...`")
+        await update.message.reply_text("⚠️ **Faltan datos.**\nEscribe: `/registrar Juan Perez 123456`", parse_mode=ParseMode.MARKDOWN)
         return
 
-    # Convertimos a MAYÚSCULAS para mantener orden
     datos = [d.upper() for d in list(context.args)]
-    
     try:
         sheet.append_row(datos)
-        await update.message.reply_text(f"✅ **Guardado:** {' '.join(datos)}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"✅ **Guardado Exitosamente:**\n{' '.join(datos)}", parse_mode=ParseMode.MARKDOWN)
     except Exception:
-        await update.message.reply_text("❌ Error guardando datos.")
+        await update.message.reply_text("❌ Error conectando con la hoja.")
 
 @restringido
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -113,7 +129,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sheet is None: sheet = conectar_sheets()
 
     if not context.args:
-        await update.message.reply_text("⚠️ Uso: `/buscar Nombre`")
+        await update.message.reply_text("⚠️ **Falta el nombre.**\nEscribe: `/buscar Juan`", parse_mode=ParseMode.MARKDOWN)
         return
 
     termino = " ".join(context.args).lower()
@@ -122,7 +138,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         vals = sheet.get_all_values()
         if not vals: 
-            await update.message.reply_text("La hoja está vacía.")
+            await update.message.reply_text("📂 La hoja está vacía.")
             return
 
         titulos, datos = vals[0], vals[1:]
@@ -141,7 +157,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = f"✅ **Resultados ({len(encontrados)}):**\n\n" + "\n➖➖➖\n".join(encontrados[:5])
             await update.message.reply_text(res, parse_mode=ParseMode.MARKDOWN)
         else:
-            await update.message.reply_text("❌ No encontrado.")
+            await update.message.reply_text("❌ No se encontraron coincidencias.")
 
     except Exception as e:
         logger.error(e)
@@ -153,11 +169,17 @@ def main():
     if not TOKEN: return
 
     app = Application.builder().token(TOKEN).build()
+    
+    # Comandos
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("registrar", registrar))
     app.add_handler(CommandHandler("buscar", buscar))
     
-    print("🤖 Bot Seguro Iniciado...")
+    # Manejador para los botones de texto (Menú)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_botones))
+    
+    print("🤖 Bot con Botones Iniciado...")
     app.run_polling()
+
 if __name__ == "__main__":
     main()
