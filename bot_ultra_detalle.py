@@ -23,10 +23,11 @@ from google.oauth2.service_account import Credentials
 NOMBRE_HOJA_USUARIOS = "Usuarios" 
 GITHUB_REPO = "jmcastagneto/datos-covid-19-peru"
 
-# 👇👇👇 TU CONFIGURACIÓN DE API (DNI Y RUC) 👇👇👇
-API_URL_DNI = "https://dniruc.apisperu.com/api/v1/dni"
-API_URL_RUC = "https://dniruc.apisperu.com/api/v1/ruc" # Nueva URL para RUC
-API_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6ImRlbmlzc3VuY3BAZ21haWwuY29tIn0.34LKNuFfxwFk8EOudYPygH_LN1ptMKKwVfHoZA-5LJI"
+# 👇👇👇 CONFIGURACIÓN NUEVA (APIPERU.DEV) 👇👇👇
+API_URL_DNI = "https://apiperu.dev/api/dni"
+API_URL_RUC = "https://apiperu.dev/api/ruc"
+# Tu nuevo token (extraído del archivo que enviaste)
+API_TOKEN = "7818396437884b8dd0b59d91ce0f94ae7a7928394b2ed05f27edb30d00fb260e"
 
 # ================== 2. LOGS Y VARIABLES ==================
 logging.basicConfig(
@@ -102,7 +103,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Acceso Denegado.")
         return
 
-    # Menú Actualizado con RUC
     teclado = [
         ["🔍 Buscar Datos", "👤 DNI", "🏢 RUC"], 
         ["❓ Ayuda", "🆔 Mi ID"]
@@ -122,7 +122,7 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif texto == "🆔 Mi ID": await update.message.reply_text(f"🆔 `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
     elif texto == "❓ Ayuda": await update.message.reply_text("ℹ️ Comandos:\n/dni [8 dígitos]\n/ruc [11 dígitos]\n/buscar [texto]\n/anuncio [msg]")
 
-# --- CONSULTA DNI ---
+# --- CONSULTA DNI (NUEVA API: APIPERU.DEV) ---
 @usuario_registrado
 async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("⚠️ Escribe el DNI: `/dni 12345678`")
@@ -131,48 +131,76 @@ async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Consultando DNI: {dni}...")
     try:
-        url_final = f"{API_URL_DNI}/{dni}?token={API_TOKEN}"
-        req = urllib.request.Request(url_final, headers={'User-Agent': 'PythonBot'})
+        # URL: https://apiperu.dev/api/dni/12345678
+        url_final = f"{API_URL_DNI}/{dni}"
+        
+        # Preparamos la solicitud con HEADERS (Autorización Bearer)
+        req = urllib.request.Request(url_final)
+        req.add_header('Authorization', f'Bearer {API_TOKEN}')
+        req.add_header('Accept', 'application/json')
+        req.add_header('Content-Type', 'application/json')
         
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
-                nombre = data.get('nombres') or "No data"
-                ap_p = data.get('apellidoPaterno') or ""
-                ap_m = data.get('apellidoMaterno') or ""
-                cod = data.get('codVerifica') or ""
+                
+                # Intentamos leer la respuesta. Si falla, mostramos mensaje de éxito
+                if data.get('success') is False:
+                    await update.message.reply_text("❌ DNI no encontrado en la base de datos.")
+                    return
+
+                # Extraer datos (apiperu.dev suele devolver 'data' o directo los campos)
+                # Ajustamos para leer la estructura típica
+                info = data.get('data', data) 
+                
+                nombre = info.get('nombres') or info.get('nombre_completo') or "No data"
+                ap_p = info.get('apellido_paterno') or info.get('apellidoPaterno') or ""
+                ap_m = info.get('apellido_materno') or info.get('apellidoMaterno') or ""
+                cod = info.get('codigo_verificacion') or ""
                 
                 msg = f"✅ **DNI ENCONTRADO:**\n🆔 `{dni}`\n👤 {nombre} {ap_p} {ap_m}"
                 if cod: msg += f"\n🔢 Cód: {cod}"
                 await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
             else: await update.message.reply_text("❌ DNI no encontrado.")
+            
+    except urllib.error.HTTPError as e:
+        await update.message.reply_text(f"❌ Error API ({e.code}): Verifica que el token tenga saldo o permisos.")
     except Exception as e:
         logger.error(f"Error API: {e}")
         await update.message.reply_text("❌ Error de conexión.")
 
-# --- CONSULTA RUC (NUEVO) ---
+# --- CONSULTA RUC (NUEVA API: APIPERU.DEV) ---
 @usuario_registrado
 async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("⚠️ Escribe el RUC: `/ruc 20100000001`")
     ruc = context.args[0]
     if len(ruc) != 11: return await update.message.reply_text("❌ El RUC debe tener 11 dígitos.")
 
-    await update.message.reply_text(f"⏳ Consultando SUNAT para RUC: {ruc}...")
+    await update.message.reply_text(f"⏳ Consultando RUC: {ruc}...")
     try:
-        url_final = f"{API_URL_RUC}/{ruc}?token={API_TOKEN}"
-        req = urllib.request.Request(url_final, headers={'User-Agent': 'PythonBot'})
+        # URL: https://apiperu.dev/api/ruc/20123456789
+        url_final = f"{API_URL_RUC}/{ruc}"
+        
+        # Preparamos HEADERS
+        req = urllib.request.Request(url_final)
+        req.add_header('Authorization', f'Bearer {API_TOKEN}')
+        req.add_header('Accept', 'application/json')
         
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
                 
-                razon = data.get('razonSocial') or "Sin Nombre"
-                estado = data.get('estado') or "-"
-                condicion = data.get('condicion') or "-"
-                direccion = data.get('direccion') or "-"
-                ubigeo = data.get('ubigeo') or "-"
+                if data.get('success') is False:
+                    await update.message.reply_text("❌ RUC no encontrado.")
+                    return
+
+                info = data.get('data', data)
+
+                razon = info.get('nombre_o_razon_social') or info.get('razonSocial') or "Sin Nombre"
+                estado = info.get('estado') or "-"
+                condicion = info.get('condicion') or "-"
+                direccion = info.get('direccion_completa') or info.get('direccion') or "-"
                 
-                # Iconos según estado
                 icon_estado = "✅" if estado == "ACTIVO" else "⚠️"
                 icon_cond = "✅" if condicion == "HABIDO" else "🚫"
 
@@ -182,11 +210,13 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📛 **Razón Social:** {razon}\n"
                     f"{icon_estado} **Estado:** {estado}\n"
                     f"{icon_cond} **Condición:** {condicion}\n"
-                    f"📍 **Dirección:** {direccion}\n"
-                    f"🗺️ **Ubigeo:** {ubigeo}"
+                    f"📍 **Dirección:** {direccion}"
                 )
                 await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
             else: await update.message.reply_text("❌ RUC no encontrado.")
+            
+    except urllib.error.HTTPError as e:
+        await update.message.reply_text(f"❌ Error API ({e.code}): Verifica el token.")
     except Exception as e:
         logger.error(f"Error API RUC: {e}")
         await update.message.reply_text("❌ Error de conexión con SUNAT.")
@@ -235,7 +265,7 @@ async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.wfile.write(b"Bot DNI+RUC Activo")
+        self.wfile.write(b"Bot APIPERU Activo")
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -247,7 +277,7 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("dni", consulta_dni))
-    app.add_handler(CommandHandler("ruc", consulta_ruc)) # COMANDO RUC AGREGADO
+    app.add_handler(CommandHandler("ruc", consulta_ruc))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("anuncio", anuncio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manejar_botones))
