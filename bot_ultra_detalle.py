@@ -23,7 +23,7 @@ from google.oauth2.service_account import Credentials
 NOMBRE_HOJA_USUARIOS = "Usuarios" 
 GITHUB_REPO = "jmcastagneto/datos-covid-19-peru"
 
-# 👇👇👇 CONFIGURACIÓN APIPERU.DEV (CONFIRMADO CON TU POSTMAN) 👇👇👇
+# 👇👇👇 CONFIGURACIÓN APIPERU.DEV (CONFIRMADO) 👇👇👇
 API_URL_DNI = "https://apiperu.dev/api/dni"
 API_URL_RUC = "https://apiperu.dev/api/ruc"
 # Tu token del archivo Postman:
@@ -131,26 +131,19 @@ async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Consultando DNI: {dni}...")
     try:
-        # URL GET: https://apiperu.dev/api/dni/12345678
         url_final = f"{API_URL_DNI}/{dni}"
-        
-        # Configurar HEADERS (Esto sustituye a 'requests')
         req = urllib.request.Request(url_final)
         req.add_header('Authorization', f'Bearer {API_TOKEN}')
         req.add_header('Accept', 'application/json')
         req.add_header('Content-Type', 'application/json')
         
-        # Ejecutar petición
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
-                
-                # ApiPeru.dev verifica éxito con 'success'
                 if not data.get('success'):
                     await update.message.reply_text("❌ DNI no encontrado.")
                     return
 
-                # Extraer datos (apiperu usa snake_case)
                 info = data.get('data', {})
                 nombre = info.get('nombres') or "No data"
                 ap_p = info.get('apellido_paterno') or ""
@@ -163,7 +156,6 @@ async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await update.message.reply_text("❌ DNI no encontrado.")
             
     except urllib.error.HTTPError as e:
-        # Error 401 suele ser Token inválido, 404 No encontrado
         logger.error(f"HTTP Error: {e.code}")
         await update.message.reply_text(f"❌ Error del servidor ({e.code}). Revisa el Token.")
     except Exception as e:
@@ -179,10 +171,7 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Consultando RUC: {ruc}...")
     try:
-        # URL GET: https://apiperu.dev/api/ruc/20123456789
         url_final = f"{API_URL_RUC}/{ruc}"
-        
-        # Configurar HEADERS
         req = urllib.request.Request(url_final)
         req.add_header('Authorization', f'Bearer {API_TOKEN}')
         req.add_header('Accept', 'application/json')
@@ -190,7 +179,6 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
-                
                 if not data.get('success'):
                     await update.message.reply_text("❌ RUC no encontrado.")
                     return
@@ -262,11 +250,15 @@ async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
     await update.message.reply_text(f"✅ Enviado a {enviados} personas.")
 
-# ================== SERVER ==================
+# ================== SERVER (FIX PARA UPTIMEROBOT) ==================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.wfile.write(b"Bot APIPERU.DEV Listo")
+        self.wfile.write(b"Bot Activo")
+    
+    # ESTO ES LO NUEVO: Permite que UptimeRobot verifique sin error 502
+    def do_HEAD(self):
+        self.send_response(200)
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
