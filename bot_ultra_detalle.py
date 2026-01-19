@@ -23,10 +23,10 @@ from google.oauth2.service_account import Credentials
 NOMBRE_HOJA_USUARIOS = "Usuarios" 
 GITHUB_REPO = "jmcastagneto/datos-covid-19-peru"
 
-# 👇👇👇 CONFIGURACIÓN NUEVA (APIPERU.DEV) 👇👇👇
+# 👇👇👇 CONFIGURACIÓN APIPERU.DEV (CONFIRMADO CON TU POSTMAN) 👇👇👇
 API_URL_DNI = "https://apiperu.dev/api/dni"
 API_URL_RUC = "https://apiperu.dev/api/ruc"
-# Tu nuevo token (extraído del archivo que enviaste)
+# Tu token del archivo Postman:
 API_TOKEN = "7818396437884b8dd0b59d91ce0f94ae7a7928394b2ed05f27edb30d00fb260e"
 
 # ================== 2. LOGS Y VARIABLES ==================
@@ -122,7 +122,7 @@ async def manejar_botones(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif texto == "🆔 Mi ID": await update.message.reply_text(f"🆔 `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN)
     elif texto == "❓ Ayuda": await update.message.reply_text("ℹ️ Comandos:\n/dni [8 dígitos]\n/ruc [11 dígitos]\n/buscar [texto]\n/anuncio [msg]")
 
-# --- CONSULTA DNI (NUEVA API: APIPERU.DEV) ---
+# --- CONSULTA DNI (APIPERU.DEV) ---
 @usuario_registrado
 async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("⚠️ Escribe el DNI: `/dni 12345678`")
@@ -131,31 +131,30 @@ async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Consultando DNI: {dni}...")
     try:
-        # URL: https://apiperu.dev/api/dni/12345678
+        # URL GET: https://apiperu.dev/api/dni/12345678
         url_final = f"{API_URL_DNI}/{dni}"
         
-        # Preparamos la solicitud con HEADERS (Autorización Bearer)
+        # Configurar HEADERS (Esto sustituye a 'requests')
         req = urllib.request.Request(url_final)
         req.add_header('Authorization', f'Bearer {API_TOKEN}')
         req.add_header('Accept', 'application/json')
         req.add_header('Content-Type', 'application/json')
         
+        # Ejecutar petición
         with urllib.request.urlopen(req) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode())
                 
-                # Intentamos leer la respuesta. Si falla, mostramos mensaje de éxito
-                if data.get('success') is False:
-                    await update.message.reply_text("❌ DNI no encontrado en la base de datos.")
+                # ApiPeru.dev verifica éxito con 'success'
+                if not data.get('success'):
+                    await update.message.reply_text("❌ DNI no encontrado.")
                     return
 
-                # Extraer datos (apiperu.dev suele devolver 'data' o directo los campos)
-                # Ajustamos para leer la estructura típica
-                info = data.get('data', data) 
-                
-                nombre = info.get('nombres') or info.get('nombre_completo') or "No data"
-                ap_p = info.get('apellido_paterno') or info.get('apellidoPaterno') or ""
-                ap_m = info.get('apellido_materno') or info.get('apellidoMaterno') or ""
+                # Extraer datos (apiperu usa snake_case)
+                info = data.get('data', {})
+                nombre = info.get('nombres') or "No data"
+                ap_p = info.get('apellido_paterno') or ""
+                ap_m = info.get('apellido_materno') or ""
                 cod = info.get('codigo_verificacion') or ""
                 
                 msg = f"✅ **DNI ENCONTRADO:**\n🆔 `{dni}`\n👤 {nombre} {ap_p} {ap_m}"
@@ -164,12 +163,14 @@ async def consulta_dni(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await update.message.reply_text("❌ DNI no encontrado.")
             
     except urllib.error.HTTPError as e:
-        await update.message.reply_text(f"❌ Error API ({e.code}): Verifica que el token tenga saldo o permisos.")
+        # Error 401 suele ser Token inválido, 404 No encontrado
+        logger.error(f"HTTP Error: {e.code}")
+        await update.message.reply_text(f"❌ Error del servidor ({e.code}). Revisa el Token.")
     except Exception as e:
-        logger.error(f"Error API: {e}")
+        logger.error(f"Error Técnico: {e}")
         await update.message.reply_text("❌ Error de conexión.")
 
-# --- CONSULTA RUC (NUEVA API: APIPERU.DEV) ---
+# --- CONSULTA RUC (APIPERU.DEV) ---
 @usuario_registrado
 async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args: return await update.message.reply_text("⚠️ Escribe el RUC: `/ruc 20100000001`")
@@ -178,10 +179,10 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"⏳ Consultando RUC: {ruc}...")
     try:
-        # URL: https://apiperu.dev/api/ruc/20123456789
+        # URL GET: https://apiperu.dev/api/ruc/20123456789
         url_final = f"{API_URL_RUC}/{ruc}"
         
-        # Preparamos HEADERS
+        # Configurar HEADERS
         req = urllib.request.Request(url_final)
         req.add_header('Authorization', f'Bearer {API_TOKEN}')
         req.add_header('Accept', 'application/json')
@@ -190,16 +191,15 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if response.status == 200:
                 data = json.loads(response.read().decode())
                 
-                if data.get('success') is False:
+                if not data.get('success'):
                     await update.message.reply_text("❌ RUC no encontrado.")
                     return
 
-                info = data.get('data', data)
-
-                razon = info.get('nombre_o_razon_social') or info.get('razonSocial') or "Sin Nombre"
+                info = data.get('data', {})
+                razon = info.get('nombre_o_razon_social') or "Sin Nombre"
                 estado = info.get('estado') or "-"
                 condicion = info.get('condicion') or "-"
-                direccion = info.get('direccion_completa') or info.get('direccion') or "-"
+                direccion = info.get('direccion_completa') or "-"
                 
                 icon_estado = "✅" if estado == "ACTIVO" else "⚠️"
                 icon_cond = "✅" if condicion == "HABIDO" else "🚫"
@@ -216,10 +216,11 @@ async def consulta_ruc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else: await update.message.reply_text("❌ RUC no encontrado.")
             
     except urllib.error.HTTPError as e:
-        await update.message.reply_text(f"❌ Error API ({e.code}): Verifica el token.")
+        logger.error(f"HTTP Error: {e.code}")
+        await update.message.reply_text(f"❌ Error del servidor ({e.code}).")
     except Exception as e:
         logger.error(f"Error API RUC: {e}")
-        await update.message.reply_text("❌ Error de conexión con SUNAT.")
+        await update.message.reply_text("❌ Error de conexión.")
 
 # --- BÚSQUEDA HÍBRIDA ---
 @usuario_registrado
@@ -265,7 +266,7 @@ async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.wfile.write(b"Bot APIPERU Activo")
+        self.wfile.write(b"Bot APIPERU.DEV Listo")
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
