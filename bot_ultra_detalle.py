@@ -23,10 +23,10 @@ from google.oauth2.service_account import Credentials
 NOMBRE_HOJA_USUARIOS = "Usuarios" 
 GITHUB_REPO = "jmcastagneto/datos-covid-19-peru"
 
-# 👇👇👇 CONFIGURACIÓN APIPERU.DEV (CONFIRMADO) 👇👇👇
+# 👇👇👇 CONFIGURACIÓN APIPERU.DEV 👇👇👇
 API_URL_DNI = "https://apiperu.dev/api/dni"
 API_URL_RUC = "https://apiperu.dev/api/ruc"
-# Tu token del archivo Postman:
+# Tu token confirmado:
 API_TOKEN = "7818396437884b8dd0b59d91ce0f94ae7a7928394b2ed05f27edb30d00fb260e"
 
 # ================== 2. LOGS Y VARIABLES ==================
@@ -250,18 +250,20 @@ async def anuncio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except: pass
     await update.message.reply_text(f"✅ Enviado a {enviados} personas.")
 
-# ================== SERVER (FIX PARA UPTIMEROBOT) ==================
+# ================== SERVER (SOLUCIÓN UPTIMEROBOT) ==================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Para cuando entras desde el navegador
         self.send_response(200)
         self.wfile.write(b"Bot Activo")
     
-    # ESTO ES LO NUEVO: Permite que UptimeRobot verifique sin error 502
     def do_HEAD(self):
+        # Para cuando UptimeRobot comprueba el estado (ESTO SOLUCIONA EL 502)
         self.send_response(200)
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
+    # Escuchamos en 0.0.0.0 para que Render nos vea
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 def main():
